@@ -24,6 +24,7 @@ const DEFAULT_KERNEL_CONFIG: sel4::Config = sel4::Config {
     riscv_pt_levels: None,
     // Not necessary for SDF parsing
     invocations_labels: json!(null),
+    x86_xsave_size: None,
 };
 
 fn check_error(test_name: &str, expected_err: &str) {
