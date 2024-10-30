@@ -290,6 +290,23 @@ SUPPORTED_BOARDS = (
             "hello": Path("example/star64/hello")
         }
     ),
+    BoardInfo(
+        name="qemu_virt_x86_64",
+        arch=KernelArch.X86_64,
+        gcc_cpu=None,
+        gcc_march="nehalem",
+        loader_link_address=0x10000000, # 256MB
+        kernel_options = {
+            "KernelIsMCS": True,
+            "KernelPlatform": "pc99",
+            "KernelSel4Arch": "x86_64",
+            "KernelVTX": True,
+            "KernelX86MicroArch": "nehalem",
+        },
+        examples = {
+            "hello": Path("example/qemu_virt_x86_64/hello")
+        }
+    ),
 )
 
 SUPPORTED_CONFIGS = (
