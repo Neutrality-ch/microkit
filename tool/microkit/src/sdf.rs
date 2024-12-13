@@ -184,6 +184,12 @@ pub struct IOPort {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+pub struct Untyped {
+    pub id: u64,
+    pub size: u64,
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct ProtectionDomain {
     /// Only populated for child protection domains
     pub id: Option<u64>,
@@ -200,6 +206,7 @@ pub struct ProtectionDomain {
     pub setvars: Vec<SysSetVar>,
     pub virtual_machine: Option<VirtualMachine>,
     pub ioports: Vec<IOPort>,
+    pub untypeds: Vec<Untyped>,
     /// Only used when parsing child PDs. All elements will be removed
     /// once we flatten each PD and its children into one list.
     pub child_pds: Vec<ProtectionDomain>,
@@ -488,6 +495,7 @@ impl ProtectionDomain {
         let mut irqs = Vec::new();
         let mut setvars: Vec<SysSetVar> = Vec::new();
         let mut ioports: Vec<IOPort> = Vec::new();
+        let mut untypeds: Vec<Untyped> = Vec::new();
         let mut child_pds = Vec::new();
 
         let mut program_image = None;
@@ -712,6 +720,13 @@ impl ProtectionDomain {
                         ));
                     }
                 }
+                "untyped" => {
+                    check_attributes(xml_sdf, &child, &["id", "size"])?;
+                    untypeds.push(Untyped {
+                        id: sdf_parse_number(checked_lookup(xml_sdf, &child, "id")?, &child)?,
+                        size: sdf_parse_number(checked_lookup(xml_sdf, &child, "size")?, &child)?,
+                    })
+                }
                 "protection_domain" => {
                     child_pds.push(ProtectionDomain::from_xml(config, xml_sdf, &child, true)?)
                 }
@@ -764,6 +779,7 @@ impl ProtectionDomain {
             child_pds,
             virtual_machine,
             ioports,
+            untypeds,
             has_children,
             parent: None,
             text_pos: xml_sdf.doc.text_pos_at(node.range().start),

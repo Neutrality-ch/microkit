@@ -57,6 +57,7 @@ const BASE_PD_TCB_CAP: u64 = BASE_IRQ_CAP + 64;
 const BASE_VM_TCB_CAP: u64 = BASE_PD_TCB_CAP + 64;
 const BASE_VCPU_CAP: u64 = BASE_VM_TCB_CAP + 64;
 const BASE_IOPORT_CAP: u64 = BASE_VCPU_CAP + 64;
+const BASE_UNTYPED_CAP: u64 = BASE_IOPORT_CAP + 32;
 
 const MAX_SYSTEM_INVOCATION_SIZE: u64 = util::mb(128);
 
@@ -386,7 +387,7 @@ impl<'a> InitSystem<'a> {
             assert!(size.is_none());
             alloc_size = object_size;
             api_size = 0;
-        } else if object_type == ObjectType::CNode || object_type == ObjectType::SchedContext {
+        } else if object_type == ObjectType::CNode || object_type == ObjectType::SchedContext || object_type == ObjectType::Untyped {
             let sz = size.unwrap();
             assert!(util::is_power_of_two(sz));
             api_size = sz.ilog2() as u64;
@@ -2035,6 +2036,20 @@ fn build_system(
 
     let vm_cnode_objs = &cnode_objs[system.protection_domains.len()..];
 
+    // Create all the untyped objects that will be passed to PDs.
+    let mut untyped_user_objs: HashMap<&ProtectionDomain, Vec<Object>> = HashMap::new();
+    for pd in &system.protection_domains {
+        untyped_user_objs.insert(pd, vec![]);
+        for untyped in &pd.untypeds {
+            let obj = init_system.allocate_objects(
+                ObjectType::Untyped,
+                vec![format!("Untyped: PD={} ID={} SIZE={:#x}", pd.name, untyped.id, untyped.size)],
+                Some(untyped.size)
+            )[0];
+            untyped_user_objs.get_mut(pd).unwrap().push(obj);
+        }
+    }
+
     let mut cap_slot = init_system.cap_slot;
     let kernel_objects = init_system.objects;
 
@@ -2556,6 +2571,27 @@ fn build_system(
                     dest_depth: PD_CAP_BITS,
                     src_root: root_cnode_cap,
                     src_obj: *ioport_cap_address,
+                    src_depth: config.cap_address_bits,
+                    rights: Rights::All as u64,
+                    badge: 0,
+                },
+            ));
+        }
+    }
+
+    // Mint access to the user untypeds in the PD CSpace
+    for (pd_idx, pd) in system.protection_domains.iter().enumerate() {
+        for (untyped, obj) in zip(&pd.untypeds, &untyped_user_objs[pd]) {
+            let cap_idx = BASE_UNTYPED_CAP + untyped.id;
+            assert!(cap_idx < PD_CAP_SIZE);
+            system_invocations.push(Invocation::new(
+                config,
+                InvocationArgs::CnodeMint {
+                    cnode: cnode_objs[pd_idx].cap_addr,
+                    dest_index: cap_idx,
+                    dest_depth: PD_CAP_BITS,
+                    src_root: root_cnode_cap,
+                    src_obj: obj.cap_addr,
                     src_depth: config.cap_address_bits,
                     rights: Rights::All as u64,
                     badge: 0,
