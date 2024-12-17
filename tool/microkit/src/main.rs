@@ -58,6 +58,7 @@ const BASE_VM_TCB_CAP: u64 = BASE_PD_TCB_CAP + 64;
 const BASE_VCPU_CAP: u64 = BASE_VM_TCB_CAP + 64;
 const BASE_IOPORT_CAP: u64 = BASE_VCPU_CAP + 64;
 const BASE_UNTYPED_CAP: u64 = BASE_IOPORT_CAP + 32;
+const BASE_CNODE_CAP: u64 = BASE_UNTYPED_CAP + 32;
 
 const MAX_SYSTEM_INVOCATION_SIZE: u64 = util::mb(128);
 
@@ -2050,6 +2051,29 @@ fn build_system(
         }
     }
 
+    // Create all the cnode user objects that will be passed to PDs, and the extra root CNode.
+    let mut cnode_user_objs: HashMap<&ProtectionDomain, Vec<Object>> = HashMap::new();
+    let mut cnode_root_objs: HashMap<&ProtectionDomain, Object> = HashMap::new();
+    for pd in &system.protection_domains {
+        cnode_user_objs.insert(pd, vec![]);
+        for cnode in &pd.cnodes {
+            let obj = init_system.allocate_objects(
+                ObjectType::CNode,
+                vec![format!("CNode: PD={} ID={} NSLOTS={}", pd.name, cnode.id, cnode.nslots)],
+                Some(cnode.nslots)
+            )[0];
+            cnode_user_objs.get_mut(pd).unwrap().push(obj);
+        }
+        if pd.cnodes.len() > 0 {
+            let obj = init_system.allocate_objects(
+                ObjectType::CNode,
+                vec![format!("CNode: PD={} Root", pd.name)],
+                Some(64)
+            )[0];
+            cnode_root_objs.insert(pd, obj);
+        }
+    }
+
     let mut cap_slot = init_system.cap_slot;
     let kernel_objects = init_system.objects;
 
@@ -2600,6 +2624,27 @@ fn build_system(
         }
     }
 
+    // Mint access to the user cnodes in the PD CSpace
+    for (pd_idx, pd) in system.protection_domains.iter().enumerate() {
+        for (cnode, obj) in zip(&pd.cnodes, &cnode_user_objs[pd]) {
+            let cap_idx = BASE_CNODE_CAP + cnode.id;
+            assert!(cap_idx < PD_CAP_SIZE);
+            system_invocations.push(Invocation::new(
+                config,
+                InvocationArgs::CnodeMint {
+                    cnode: cnode_objs[pd_idx].cap_addr,
+                    dest_index: cap_idx,
+                    dest_depth: PD_CAP_BITS,
+                    src_root: root_cnode_cap,
+                    src_obj: obj.cap_addr,
+                    src_depth: config.cap_address_bits,
+                    rights: Rights::All as u64,
+                    badge: cnode.guard_nbits,
+                },
+            ));
+        }
+    }
+
     // Mint access to the child TCB in the CSpace of root PDs
     for (pd_idx, _) in system.protection_domains.iter().enumerate() {
         for (maybe_child_idx, maybe_child_pd) in system.protection_domains.iter().enumerate() {
@@ -2773,6 +2818,60 @@ fn build_system(
                     badge: 0,
                 },
             ));
+        }
+    }
+
+    // Mint access to the user cnodes in the PD CSpace. This is only
+    // applicable to PDs that have requested CNode objects. We first
+    // need to create a new root CNode with no guard and mint their
+    // current root CNode in slot 0. This way all capability index
+    // defined in their current root CNode remain valid, and we can
+    // insert the user defined CNodes into the new root CNode. This is
+    // a bit similar to the early bootstrap invocations.
+    for (pd_idx, pd) in system.protection_domains.iter().enumerate() {
+        if pd.cnodes.len() != 0 {
+            let newroot_obj = &cnode_root_objs[pd];
+            let oldroot_obj = &cnode_objs[pd_idx];
+            let newroot_nslots: u64 = 64;
+            let newroot_bits = newroot_nslots.ilog2() as u64;
+
+            // Mint the old root as zeroth entry in the new root.
+            // Propagate the guard value, just subtract the number of
+            // bits of the new root CNode.
+            let guard = config.cap_address_bits
+                - PD_CAP_BITS
+                - newroot_bits;
+            system_invocations.push(Invocation::new(
+                config,
+                InvocationArgs::CnodeMint {
+                    cnode: newroot_obj.cap_addr,
+                    dest_index: 0,
+                    dest_depth: newroot_bits,
+                    src_root: root_cnode_cap,
+                    src_obj: oldroot_obj.cap_addr,
+                    src_depth: config.cap_address_bits,
+                    rights: Rights::All as u64,
+                    badge: guard,
+                },
+            ));
+
+            // Mint all user CNodes.
+            for (cap_idx, (cnode, obj)) in zip(&pd.cnodes, &cnode_user_objs[pd]).enumerate() {
+                assert!(cap_idx + 1 < 64);
+                system_invocations.push(Invocation::new(
+                    config,
+                    InvocationArgs::CnodeMint {
+                        cnode: newroot_obj.cap_addr,
+                        dest_index: (cap_idx + 1) as u64,
+                        dest_depth: newroot_bits,
+                        src_root: root_cnode_cap,
+                        src_obj: obj.cap_addr,
+                        src_depth: config.cap_address_bits,
+                        rights: Rights::All as u64,
+                        badge: cnode.guard_nbits,
+                    },
+                ));
+            }
         }
     }
 
@@ -3083,6 +3182,25 @@ fn build_system(
         },
     );
     system_invocations.push(pd_set_space_invocation);
+
+    // Change the CSpace root of the PDs that have extra CNode
+    // objects. This isn't very pretty but I don't want to break the
+    // repeat loop above.
+    for (pd_idx, pd) in system.protection_domains.iter().enumerate() {
+        if pd.cnodes.len() > 0 {
+            system_invocations.push(Invocation::new(
+                config,
+                InvocationArgs::TcbSetSpace {
+                    tcb: tcb_objs[pd_idx].cap_addr,
+                    fault_ep: badged_fault_ep,
+                    cspace_root:  cnode_root_objs[pd].cap_addr,
+                    cspace_root_data: 0,
+                    vspace_root: vspace_objs[pd_idx].cap_addr,
+                    vspace_root_data: 0,
+                },
+            ));
+        }
+    }
 
     for (vm_idx, vm) in virtual_machines.iter().enumerate() {
         let fault_ep_offset = system.protection_domains.len() + vm_idx;
